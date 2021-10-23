@@ -80,7 +80,8 @@ type rateLimit struct {
 
 func newRateLimit(lim int, d time.Duration) *rateLimit {
 	return &rateLimit{
-		q: queue.NewQueue(d),
+		lim: lim,
+		q:   queue.NewQueue(d),
 	}
 }
 
@@ -160,6 +161,8 @@ func FilterLimitChars(cfg config.Settings) bot.Middleware {
 		charFunc = unicode.IsSymbol
 	case "upper":
 		charFunc = unicode.IsUpper
+	case "mark":
+		charFunc = unicode.IsMark
 	default:
 		log.Fatalf("unknown character type: %s\n", tp)
 	}

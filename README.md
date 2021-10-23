@@ -4,7 +4,7 @@ Chat bot for twitch.
 
 ## Run
 
-You need to provide `config` and `cred` files. By default these are `./config.yml` and `creds.yml`.
+You need to provide `config` and `cred` files. By default these are `./config.yml` and `./creds.yml`.
 
 ### Config
 
@@ -16,7 +16,7 @@ channels: # list of channels
   - name: <channel-1> # name of channel
     chat: # object that contains settings for specific channel
       middlewares: # optional field that provides ability to filter/process messages
-        - type: <middleware-type> # middlewares are called starting from the first
+        - type: <middleware-type>
           settings:
             first: value-1
             second: value-2
