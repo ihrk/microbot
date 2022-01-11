@@ -8,11 +8,11 @@ import (
 
 type HandlerFunc func(s *Sender)
 
+var _ Handler = (HandlerFunc)(nil)
+
 func (f HandlerFunc) Serve(s *Sender) {
 	f(s)
 }
-
-var _ Handler = (HandlerFunc)(nil)
 
 func Concat(middlewares ...Middleware) Middleware {
 	return func(h Handler) Handler {
@@ -27,32 +27,50 @@ func Wrap(handler Handler, middlewares ...Middleware) Handler {
 	return Concat(middlewares...)(handler)
 }
 
-var _ Handler = (*Mux)(nil)
+type Router interface {
+	Match(*irc.Msg) (Handler, bool)
+}
 
-type Mux struct {
+type StringRouter struct {
 	middleware Middleware
 	matcher    func(*irc.Msg) (string, bool)
 	handlers   map[string]Handler
 }
 
-func NewMux(matcher func(*irc.Msg) (string, bool), middlewares ...Middleware) *Mux {
-	return &Mux{
+var _ Router = (*StringRouter)(nil)
+
+func NewStringRouter(
+	matcher func(*irc.Msg) (string, bool),
+	middlewares ...Middleware,
+) *StringRouter {
+	return &StringRouter{
 		middleware: Concat(middlewares...),
 		matcher:    matcher,
 		handlers:   make(map[string]Handler),
 	}
 }
 
-func (m *Mux) Add(key string, handler Handler, middlewares ...Middleware) {
-	m.handlers[key] = Wrap(handler, m.middleware, Concat(middlewares...))
+func (r *StringRouter) Match(msg *irc.Msg) (Handler, bool) {
+	key, ok := r.matcher(msg)
+	if !ok {
+		return nil, false
+	}
+
+	h, ok := r.handlers[key]
+
+	return h, ok
 }
 
-func (m *Mux) Serve(s *Sender) {
-	if key, ok := m.matcher(s.Msg); ok {
-		if handler, ok := m.handlers[key]; ok {
-			handler.Serve(s)
-		}
-	}
+func (r *StringRouter) Add(
+	key string,
+	handler Handler,
+	middlewares ...Middleware,
+) {
+	r.handlers[key] = Wrap(
+		handler,
+		r.middleware,
+		Concat(middlewares...),
+	)
 }
 
 func MatchType(msg *irc.Msg) (string, bool) {
@@ -81,25 +99,38 @@ func MatchReward(msg *irc.Msg) (string, bool) {
 	return rewardID, ok
 }
 
-var _ Handler = (*Router)(nil)
-
-type Router struct {
-	muxes []*Mux
+type SingleRouter struct {
+	h Handler
 }
 
-func NewRouter(muxes ...*Mux) *Router {
-	return &Router{
-		muxes: muxes,
+var _ Router = (*SingleRouter)(nil)
+
+func NewSingleRouter(h Handler) *SingleRouter {
+	return &SingleRouter{h}
+}
+
+func (r *SingleRouter) Match(_ *irc.Msg) (Handler, bool) {
+	return r.h, true
+}
+
+type Mux struct {
+	routers []Router
+}
+
+var _ Handler = (*Mux)(nil)
+
+func NewMux(routers ...Router) Handler {
+	return &Mux{
+		routers: routers,
 	}
 }
 
-func (r *Router) Serve(s *Sender) {
-	for _, m := range r.muxes {
-		if key, ok := m.matcher(s.Msg); ok {
-			if handler, ok := m.handlers[key]; ok {
-				handler.Serve(s)
-				return
-			}
+func (m *Mux) Serve(s *Sender) {
+	for _, r := range m.routers {
+		h, ok := r.Match(s.Msg)
+		if ok {
+			h.Serve(s)
+			return
 		}
 	}
 }

@@ -92,6 +92,11 @@ func (s *Sender) Reply(text string) {
 	}
 }
 
+func (s *Sender) Delete() {
+	text := fmt.Sprintf("/delete %s", s.Msg.Tags["id"])
+	s.Send(text)
+}
+
 func (s *Sender) Timeout(d time.Duration, reason string) {
 	s.TimeoutUser(s.Msg.User, d, reason)
 }

@@ -13,10 +13,11 @@ func main() {
 		credsPath  string
 	)
 
-	flag.StringVar(&configPath, "config", "./config.yml", "")
-	flag.StringVar(&credsPath, "creds", "./creds.yml", "")
+	flag.StringVar(&configPath, "config", "./config.yml", "path to configuration file")
+	flag.StringVar(&credsPath, "creds", "./creds.yml", "path to file with creds")
 
 	flag.Parse()
 
-	log.Fatal(app.LoadConfigAndRun(configPath, credsPath))
+	log.Fatalf("dial failed with error: %v\n",
+		app.LoadConfigAndRun(configPath, credsPath))
 }

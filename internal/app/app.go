@@ -5,6 +5,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/ihrk/microbot/internal/backoff"
 	"github.com/ihrk/microbot/internal/bot"
 	"github.com/ihrk/microbot/internal/config"
 	"github.com/ihrk/microbot/internal/creds"
@@ -48,27 +49,29 @@ func loadConfig(cfg *config.App) *app {
 	return &a
 }
 
-func (a *app) run(ctx context.Context) (err error) {
-	backoff := initialBackoff
+func (a *app) run(ctx context.Context) error {
+	var (
+		client *irc.Client
+		err    error
+	)
 
-	for i := 0; i < retryLim; i++ {
-		var client *irc.Client
-		client, err = irc.Dial(ctx, dialTimeout)
+	for {
+		err = backoff.RunWithRetry(retryLim, initialBackoff,
+			func() error {
+				var dialErr error
+				log.Println("attempting to dial...")
+				client, dialErr = irc.Dial(ctx, dialTimeout)
+				return dialErr
+			})
 		if err != nil {
-			log.Printf("dial failed with error: %v\n", err)
-		} else {
-			i = -1
-			backoff = initialBackoff
-
-			err = a.listenAndServe(ctx, client)
-			log.Printf("connection failed with error: %v\n", err)
+			return err
 		}
 
-		time.Sleep(backoff)
-		backoff *= 2
-	}
+		log.Println("dial is successful")
 
-	return err
+		err = a.listenAndServe(ctx, client)
+		log.Printf("connection interrupted with error: %v\n", err)
+	}
 }
 
 func (a *app) listenAndServe(ctx context.Context, c *irc.Client) error {

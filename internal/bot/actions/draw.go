@@ -9,17 +9,29 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/disintegration/gift"
 	"github.com/ihrk/dots"
 	"github.com/ihrk/microbot/internal/bot"
+	"github.com/ihrk/microbot/internal/cache"
 	"github.com/ihrk/microbot/internal/config"
+	"github.com/ihrk/microbot/internal/extra/bttv"
+	"github.com/ihrk/microbot/internal/extra/ffz"
+	"github.com/ihrk/microbot/internal/irc"
 )
 
 func Draw(_ config.Settings) bot.Handler {
+	ees := newExtensionEmoteStorage()
+
 	return bot.HandlerFunc(func(s *bot.Sender) {
-		emoteID, ok := getEmoteID(s.Msg.Tags)
+		emoteURL, ok := getTwitchEmoteURL(s.Msg.Tags)
 		if !ok {
+			emoteURL, ok = ees.getURL(s.Msg)
+		}
+
+		if !ok {
+			s.Reply("Error: emote not found")
 			log.Printf("emote not found in msg: %v\n", s.Msg.Raw)
 			return
 		}
@@ -32,7 +44,7 @@ func Draw(_ config.Settings) bot.Handler {
 			}
 		}()
 
-		resp, err := http.Get(getEmoteURL(emoteID))
+		resp, err := http.Get(emoteURL)
 		if err != nil {
 			log.Printf("get emote request error: %v\n", err)
 			return
@@ -62,6 +74,12 @@ func Draw(_ config.Settings) bot.Handler {
 			gift.UnsharpMask(2, 1, 0),
 		)
 
+		for _, w := range strings.Fields(s.Msg.Text) {
+			if w == "-evil" {
+				g.Add(gift.Invert())
+			}
+		}
+
 		dst := image.NewRGBA(g.Bounds(src.Bounds()))
 
 		g.Draw(dst, src)
@@ -74,7 +92,7 @@ func Draw(_ config.Settings) bot.Handler {
 	})
 }
 
-func getEmoteID(tags map[string]string) (string, bool) {
+func getTwitchEmoteID(tags map[string]string) (string, bool) {
 	emotes := tags["emotes"]
 	end := strings.Index(emotes, ":")
 	if end == -1 {
@@ -85,6 +103,106 @@ func getEmoteID(tags map[string]string) (string, bool) {
 
 const urlPattern = "https://static-cdn.jtvnw.net/emoticons/v2/%v/default/dark/3.0"
 
-func getEmoteURL(emoteID string) string {
-	return fmt.Sprintf(urlPattern, emoteID)
+func getTwitchEmoteURL(tags map[string]string) (string, bool) {
+	emoteID, ok := getTwitchEmoteID(tags)
+	if !ok {
+		return "", false
+	}
+
+	return fmt.Sprintf(urlPattern, emoteID), true
+}
+
+type extensionEmoteStorage struct {
+	c cache.Cache
+}
+
+func newExtensionEmoteStorage() *extensionEmoteStorage {
+	return &extensionEmoteStorage{cache.New()}
+}
+
+func (s *extensionEmoteStorage) getURL(msg *irc.Msg) (string, bool) {
+	roomID, ok := msg.Tags["room-id"]
+	if !ok {
+		log.Printf("room id not found in message: %s\n", msg.Raw)
+		return "", false
+	}
+
+	var emoteMap map[string]emote
+
+	v, ok := s.c.Get(roomID)
+	if !ok {
+		emoteMap, ok = s.collectEmotes(roomID)
+		if !ok {
+			return "", false
+		}
+
+		s.c.Set(roomID, emoteMap, time.Hour)
+	} else {
+		emoteMap = v.(map[string]emote)
+	}
+
+	words := strings.Fields(msg.Text)
+	for _, word := range words {
+		if e, ok := emoteMap[word]; ok {
+			return e.ImageURL(), true
+		}
+	}
+
+	return "", false
+}
+
+func (s *extensionEmoteStorage) collectEmotes(roomID string) (map[string]emote, bool) {
+	log.Println("collecting extension emotes...")
+
+	bttvGlobalEmotes, err := bttv.GetGlobalEmotes()
+	if err != nil {
+		log.Printf("bttv global emotes request failed with error: %v", err)
+		return nil, false
+	}
+
+	ffzGlobalEmotes, err := ffz.GetGlobalEmotes()
+	if err != nil {
+		log.Printf("ffz global emotes request failed with error: %v", err)
+		return nil, false
+	}
+
+	bttvUserEmotes, err := bttv.GetUserEmotes(roomID)
+	if err != nil {
+		log.Printf("bttv user emotes request failed with error: %v", err)
+		return nil, false
+	}
+
+	ffzUserEmotes, err := ffz.GetUserEmotes(roomID)
+	if err != nil {
+		log.Printf("ffz user emotes request failed with error: %v", err)
+		return nil, false
+	}
+
+	emoteMap := map[string]emote{}
+
+	for _, e := range bttvGlobalEmotes {
+		emoteMap[e.Code] = e
+	}
+
+	for _, e := range ffzGlobalEmotes {
+		emoteMap[e.Code] = e
+	}
+
+	for _, e := range bttvUserEmotes.ChannelEmotes {
+		emoteMap[e.Code] = e
+	}
+
+	for _, e := range bttvUserEmotes.SharedEmotes {
+		emoteMap[e.Code] = e
+	}
+
+	for _, e := range ffzUserEmotes {
+		emoteMap[e.Code] = e
+	}
+
+	return emoteMap, true
+}
+
+type emote interface {
+	ImageURL() string
 }

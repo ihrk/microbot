@@ -9,17 +9,27 @@ import (
 	"github.com/ihrk/microbot/internal/extra/riot"
 )
 
-var queueTypes = map[string]string{
-	"solo": "RANKED_SOLO_5x5",
-	"flex": "RANKED_FLEX_SR",
+const (
+	queueSolo = "solo"
+	queueFlex = "flex"
+)
+
+var queueTypes = []string{
+	queueSolo,
+	queueFlex,
+}
+
+var queueTypeMap = map[string]string{
+	queueSolo: "RANKED_SOLO_5x5",
+	queueFlex: "RANKED_FLEX_SR",
 }
 
 func Elo(cfg config.Settings) bot.Handler {
 	region := cfg.MustString("region")
 	summonerName := cfg.MustString("summonerName")
-	queueType := cfg.StringWithDefault("queueType", "solo")
+	queueType := cfg.StringFromSetWithDefault("queueType", queueTypes, queueSolo)
 
-	tp, ok := queueTypes[queueType]
+	tp, ok := queueTypeMap[queueType]
 	if !ok {
 		log.Fatalf("unknown lol queue type: %s\n", queueType)
 	}

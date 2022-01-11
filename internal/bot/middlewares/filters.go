@@ -2,6 +2,7 @@ package middlewares
 
 import (
 	"log"
+	"regexp"
 	"strings"
 	"time"
 	"unicode"
@@ -9,138 +10,173 @@ import (
 	"github.com/ihrk/microbot/internal/bot"
 	"github.com/ihrk/microbot/internal/config"
 	"github.com/ihrk/microbot/internal/irc"
-	"github.com/ihrk/microbot/internal/queue"
+	"github.com/ihrk/microbot/internal/limit"
 )
 
 type filter struct {
-	ff func(msg *irc.Msg) bool
+	ff filterFunc
 	h  bot.Handler
+
+	passThrough bool
+
+	allowMod     bool
+	allowVIP     bool
+	allowSub     bool
+	allowRewards []string
 }
 
-func (f *filter) mw(next bot.Handler) bot.Handler {
-	return bot.HandlerFunc(func(s *bot.Sender) {
-		if f.ff(s.Msg) {
-			next.Serve(s)
-		} else {
-			f.h.Serve(s)
-		}
-	})
-}
+type filterFunc func(*irc.Msg) bool
 
-func filterHandler(cfg config.Settings) bot.Handler {
-	filterAction, _ := cfg.String("filterAction")
-
-	var d time.Duration
-	if filterAction == "timeout" {
-		d = cfg.MustDuration("duration")
-	}
-
-	var replyText string
-	if filterAction == "reply" {
-		replyText = cfg.MustString("text")
-	}
-
-	reason, _ := cfg.String("reason")
-
-	switch filterAction {
-	case "":
-		return bot.HandlerFunc(func(s *bot.Sender) {})
-	case "ban":
-		return bot.HandlerFunc(func(s *bot.Sender) {
-			s.Ban(reason)
-		})
-	case "timeout":
-		return bot.HandlerFunc(func(s *bot.Sender) {
-			s.Timeout(d, reason)
-		})
-	case "reply":
-		return bot.HandlerFunc(func(s *bot.Sender) {
-			s.Reply(replyText)
-		})
-	default:
-		log.Fatalf("unknown filter action: %s\n", filterAction)
-	}
-
-	return nil
-}
-
-func newFilter(cfg config.Settings, ff func(*irc.Msg) bool) bot.Middleware {
+func Filter(cfg config.Settings) bot.Middleware {
 	var f filter
 
-	f.ff = ff
-	f.h = filterHandler(cfg)
+	f.h = newFilterHandler(cfg)
+	f.ff = newFilterFunc(cfg)
+
+	f.passThrough = cfg.Bool("passThrough")
+
+	f.allowMod = cfg.Bool("allowMod")
+	f.allowVIP = cfg.Bool("allowVIP")
+	f.allowSub = cfg.Bool("allowSub")
+
+	f.allowRewards = cfg.Strings("allowRewards")
 
 	return f.mw
 }
 
-type rateLimit struct {
-	lim int
-	q   queue.Queue
+func (f *filter) mw(next bot.Handler) bot.Handler {
+	return bot.HandlerFunc(func(s *bot.Sender) {
+		rewardUUID, isReward := getReward(s.Msg)
+
+		ok := isBroadcaster(s.Msg) ||
+			f.allowMod && isMod(s.Msg) ||
+			f.allowVIP && isVIP(s.Msg) ||
+			f.allowSub && isSub(s.Msg) ||
+			isReward && elem(rewardUUID, f.allowRewards) ||
+			f.ff(s.Msg)
+
+		if !ok {
+			f.h.Serve(s)
+		}
+
+		if ok || f.passThrough {
+			next.Serve(s)
+		}
+	})
 }
 
-func newRateLimit(lim int, d time.Duration) *rateLimit {
-	return &rateLimit{
-		lim: lim,
-		q:   queue.NewQueue(d),
+func pureFunc(ff filterFunc) func(config.Settings) filterFunc {
+	return func(_ config.Settings) filterFunc {
+		return ff
 	}
 }
 
-func (rl *rateLimit) ff(_ *irc.Msg) bool {
-	_, ok := rl.q.TryPush(1, rl.lim)
-	return ok
+var filterFuncStorage = map[string]func(config.Settings) filterFunc{
+	"byUsername": byUsername,
+	"countLimit": countLimit,
+	"limitChars": limitChars,
+	"blockLinks": pureFunc(blockLinks),
+	"blockAll":   pureFunc(blockAll),
 }
 
-func FilterRatelimit(cfg config.Settings) bot.Middleware {
-	lim := cfg.MustInt("limit")
-	period := cfg.MustDuration("period")
+func newFilterFunc(cfg config.Settings) filterFunc {
+	filterType := cfg.MustString("type")
 
-	rl := newRateLimit(lim, period)
+	bf, found := filterFuncStorage[filterType]
+	if !found {
+		log.Fatalf("filter type not found: %s\n", filterType)
+	}
 
-	return newFilter(cfg, rl.ff)
+	return bf(cfg)
+}
+
+const (
+	penaltyDeleteMsg = "deleteMsg"
+	penaltyTimeout   = "timeout"
+	penaltyBan       = "ban"
+)
+
+var penaltyTypes = []string{
+	penaltyDeleteMsg,
+	penaltyTimeout,
+	penaltyBan,
+}
+
+func newFilterHandler(cfg config.Settings) bot.Handler {
+	penalty, _ := cfg.StringFromSet("penalty", penaltyTypes)
+
+	var duration time.Duration
+	if penalty == penaltyTimeout {
+		duration = cfg.MustDuration("duration")
+	}
+
+	replyText, hasReply := cfg.String("reply")
+
+	reason, _ := cfg.String("reason")
+
+	return bot.HandlerFunc(func(s *bot.Sender) {
+		switch penalty {
+		case penaltyDeleteMsg:
+			s.Delete()
+		case penaltyTimeout:
+			s.Timeout(duration, reason)
+		case penaltyBan:
+			s.Ban(reason)
+		}
+
+		if hasReply {
+			s.Reply(replyText)
+		}
+	})
+}
+
+func countLimit(cfg config.Settings) filterFunc {
+	lim := cfg.MustInt("limitAmount")
+	per := cfg.MustDuration("limitPeriod")
+
+	l := limit.New(lim, per)
+	return func(msg *irc.Msg) bool {
+		return l.Add(1)
+	}
 }
 
 func isBroadcaster(msg *irc.Msg) bool {
 	return strings.Contains(msg.Tags["badges"], "broadcaster")
-
 }
 
 func isMod(msg *irc.Msg) bool {
-	return isBroadcaster(msg) ||
-		strings.Contains(msg.Tags["badges"], "moderator")
+	return strings.Contains(msg.Tags["badges"], "moderator")
 }
 
 func isVIP(msg *irc.Msg) bool {
-	return isMod(msg) ||
-		strings.Contains(msg.Tags["badges"], "vip")
+	return strings.Contains(msg.Tags["badges"], "vip")
 }
 
 func isSub(msg *irc.Msg) bool {
-	return isMod(msg) ||
-		strings.Contains(msg.Tags["badges"], "subscriber")
+	return strings.Contains(msg.Tags["badges"], "subscriber")
 }
 
-func FilterBroadcaster(cfg config.Settings) bot.Middleware {
-	return newFilter(cfg, isBroadcaster)
+func getReward(msg *irc.Msg) (string, bool) {
+	s, ok := msg.Tags["custom-reward-id"]
+	return s, ok
 }
 
-func FilterMod(cfg config.Settings) bot.Middleware {
-	return newFilter(cfg, isMod)
+func elem(s string, a []string) bool {
+	for i := range a {
+		if s == a[i] {
+			return true
+		}
+	}
+
+	return false
 }
 
-func FilterVIP(cfg config.Settings) bot.Middleware {
-	return newFilter(cfg, isVIP)
-}
-
-func FilterSub(cfg config.Settings) bot.Middleware {
-	return newFilter(cfg, isSub)
-}
-
-func FilterUser(cfg config.Settings) bot.Middleware {
+func byUsername(cfg config.Settings) filterFunc {
 	name := cfg.MustString("username")
 
-	return newFilter(cfg, func(msg *irc.Msg) bool {
+	return func(msg *irc.Msg) bool {
 		return msg.User == name
-	})
+	}
 }
 
 func countFunc(s string, f func(rune) bool) int {
@@ -153,7 +189,7 @@ func countFunc(s string, f func(rune) bool) int {
 	return n
 }
 
-func FilterLimitChars(cfg config.Settings) bot.Middleware {
+func limitChars(cfg config.Settings) filterFunc {
 	tp := cfg.MustString("charType")
 	var charFunc func(rune) bool
 	switch tp {
@@ -169,7 +205,17 @@ func FilterLimitChars(cfg config.Settings) bot.Middleware {
 
 	limit := cfg.MustInt("charLimit")
 
-	return newFilter(cfg, func(msg *irc.Msg) bool {
+	return func(msg *irc.Msg) bool {
 		return countFunc(msg.Text, charFunc) <= limit
-	})
+	}
+}
+
+var urlExpr = regexp.MustCompile(`(http(s)?:\/\/.)?(www\.)?[-a-zA-Z0-9@:%._+~#=]{1,256}\.[a-z]{2,6}\b([-a-zA-Z0-9@:%_+.~#?&/=]*)`)
+
+func blockLinks(msg *irc.Msg) bool {
+	return !urlExpr.MatchString(msg.Text)
+}
+
+func blockAll(_ *irc.Msg) bool {
+	return false
 }

@@ -4,28 +4,23 @@ import (
 	"fmt"
 	"log"
 	"net/url"
+	"regexp"
 	"strings"
 
 	"github.com/ihrk/microbot/internal/bot"
 	"github.com/ihrk/microbot/internal/config"
 )
 
+var urlExpr = regexp.MustCompile(`(http(s)?:\/\/.)?(www\.)?[-a-zA-Z0-9@:%._+~#=]{2,256}\.[a-z]{2,6}\b([-a-zA-Z0-9@:%_+.~#?&/=]*)`)
+
 func SongRequest(cfg config.Settings) bot.Handler {
 	requestCmd := cfg.MustString("requestCmd")
 
 	return bot.HandlerFunc(func(s *bot.Sender) {
-		var videoID string
-
-		fields := strings.Fields(s.Msg.Text)
-		for _, field := range fields {
-			if strings.HasPrefix(field, "https") {
-				videoID = getYoutubeVideoID(field)
-				break
-			}
-		}
-
-		if videoID == "" {
-			log.Printf("link not found, msg: %s\n", s.Msg.Text)
+		rawURL := urlExpr.FindString(s.Msg.Text)
+		videoID, err := getYoutubeVideoID(rawURL)
+		if err != nil {
+			log.Printf("link not found with err: %s, msg: %s\n", err, s.Msg.Text)
 			return
 		}
 
@@ -34,18 +29,22 @@ func SongRequest(cfg config.Settings) bot.Handler {
 	})
 }
 
-func getYoutubeVideoID(rawURL string) (videoID string) {
-	u, err := url.Parse(rawURL)
+func getYoutubeVideoID(rawURL string) (string, error) {
+	u, err := url.ParseRequestURI(rawURL)
 	if err != nil {
-		return
+		return "", err
 	}
 
-	switch u.Hostname() {
+	var videoID string
+
+	switch host := u.Hostname(); host {
 	case "www.youtube.com", "m.youtube.com":
 		videoID = u.Query().Get("v")
 	case "youtu.be":
 		videoID = strings.Trim(u.Path, "/")
+	default:
+		err = fmt.Errorf("unknown hostname: %s", host)
 	}
 
-	return
+	return videoID, err
 }

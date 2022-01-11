@@ -10,13 +10,8 @@ import (
 type Storage map[string]func(cfg config.Settings) bot.Middleware
 
 var defaultStorage = Storage{
-	"ratelimit":       FilterRatelimit,
-	"subOnly":         FilterSub,
-	"vipOnly":         FilterVIP,
-	"modOnly":         FilterMod,
-	"broadcasterOnly": FilterBroadcaster,
-	"userOnly":        FilterUser,
-	"limitChars":      FilterLimitChars,
+	"filter":      Filter,
+	"autorespond": Autorespond,
 }
 
 func New(cfgs []*config.Feature) bot.Middleware {
